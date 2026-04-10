@@ -60,7 +60,6 @@ struct RunCommand: ParsableCommand {
                         
                         for event in events {
                             print("Syncing event: '\(event.title ?? "Untitled")' from \(String(describing: event.startDate)) to \(String(describing: event.endDate))")
-                            print("Is recurring: \(event.recurrenceRules != nil)")
                             
                             let newEvent = EKEvent(eventStore: eventStore)
                             
@@ -75,26 +74,6 @@ struct RunCommand: ParsableCommand {
                             newEvent.isAllDay = event.isAllDay
                             newEvent.availability = event.availability
                             
-                            // Handle recurrence rules carefully
-                            if let recurrenceRules = event.recurrenceRules {
-                                print("Copying recurrence rules: \(recurrenceRules)")
-                                // Create new instances of recurrence rules to avoid reference issues
-                                newEvent.recurrenceRules = recurrenceRules.map { rule in
-                                    let newRule = EKRecurrenceRule(
-                                        recurrenceWith: rule.frequency,
-                                        interval: rule.interval,
-                                        daysOfTheWeek: rule.daysOfTheWeek,
-                                        daysOfTheMonth: rule.daysOfTheMonth,
-                                        monthsOfTheYear: rule.monthsOfTheYear,
-                                        weeksOfTheYear: rule.weeksOfTheYear,
-                                        daysOfTheYear: rule.daysOfTheYear,
-                                        setPositions: rule.setPositions,
-                                        end: rule.recurrenceEnd
-                                    )
-                                    return newRule
-                                }
-                            }
-                            
                             // Copy alarms if any
                             if let alarms = event.alarms {
                                 newEvent.alarms = alarms.map { alarm in
@@ -104,9 +83,12 @@ struct RunCommand: ParsableCommand {
                                 }
                             }
                             
+                            // EventKit expands recurring events into individual occurrences when
+                            // querying. We always save each occurrence as a standalone event so
+                            // that deleted occurrences (exceptions) in the source calendar are
+                            // not recreated in the push calendar.
                             do {
-                                let span: EKSpan = event.recurrenceRules != nil ? .futureEvents : .thisEvent
-                                try eventStore.save(newEvent, span: span)
+                                try eventStore.save(newEvent, span: .thisEvent)
                                 print("Successfully created event: \(newEvent.title ?? "Untitled")")
                             } catch {
                                 print("Error saving event: \(error.localizedDescription)")

@@ -112,9 +112,8 @@ func deleteEvents(eventStore: EKEventStore, events: [EKEvent]) {
     for event in events {
         do {
             if event.notes?.contains("Made by CalSync") == true {
-                let span: EKSpan = event.recurrenceRules != nil ? .futureEvents : .thisEvent
-                try eventStore.remove(event, span: span)
-                print("Deleted event: \(event.title ?? "Untitled") (Recurring: \(event.recurrenceRules != nil))")
+                try eventStore.remove(event, span: .thisEvent)
+                print("Deleted event: \(event.title ?? "Untitled")")
             } else {
                 print("Warning: Attempted to delete non-CalSync event: \(event.title ?? "Untitled")")
             }
