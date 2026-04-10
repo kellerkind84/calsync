@@ -92,10 +92,33 @@ func getEventsNextXDays(calendar: EKCalendar, eventStore: EKEventStore, numDays:
     return events
 }
 
+// Title prefixes that Exchange/Apple Calendar adds for declined or cancelled events.
+// These cover the most common locales; extend as needed.
+private let declinedOrCancelledPrefixes = [
+    "Abgelehnt:",    // German: Declined
+    "Declined:",     // English: Declined
+    "Abgesagt:",     // German: Cancelled
+    "Canceled:",     // English (US): Cancelled
+    "Cancelled:",    // English (UK): Cancelled
+    "Refusé:",       // French: Declined
+    "Annulé:",       // French: Cancelled
+]
+
 func getNonCalSyncEventsNextXDays(calendar: EKCalendar, eventStore: EKEventStore, numDays: Int) -> [EKEvent] {
     let events = getEventsNextXDays(calendar: calendar, eventStore: eventStore, numDays: numDays)
     let nonCalSyncEvents = events.filter { event in
-        return !(event.notes?.contains("Made by CalSync") == true)
+        // Skip CalSync-created events
+        if event.notes?.contains("Made by CalSync") == true { return false }
+        // Skip cancelled events via EventKit status
+        if event.status == .canceled { return false }
+        // Skip events the current user has declined via attendee status
+        if let selfAttendee = event.attendees?.first(where: { $0.isCurrentUser }),
+           selfAttendee.participantStatus == .declined { return false }
+        // Skip events where Apple Calendar has added a declined/cancelled prefix
+        // (Exchange sync populates these prefixes when attendee status isn't reliably available)
+        if let title = event.title,
+           declinedOrCancelledPrefixes.contains(where: { title.hasPrefix($0) }) { return false }
+        return true
     }
     return nonCalSyncEvents
 }
