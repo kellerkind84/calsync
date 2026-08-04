@@ -145,3 +145,84 @@ func deleteEvents(eventStore: EKEventStore, events: [EKEvent]) {
         }
     }
 }
+
+// MARK: - Reconciliation (diff-based sync)
+//
+// Rather than deleting every CalSync-created event and recreating it from
+// scratch on every run (which churns the shared EventKit/CalendarAgent
+// database and can race with other apps reading calendar data, e.g. Things
+// failing with EKCADErrorDomain Code=1010 while an event it's reading gets
+// deleted out from under it), we embed a stable source key in each synced
+// event's notes and only create/update/delete events that actually changed.
+
+private let sourceKeyMarkerPrefix = "SourceID: "
+
+/// A stable key identifying a specific occurrence of a source event, used to
+/// match previously-synced events across runs.
+///
+/// We deliberately do NOT use `event.eventIdentifier` here: for
+/// Exchange/CalDAV-backed calendars, EventKit does not guarantee stable
+/// identifiers for expanded recurring occurrences across separate fetches
+/// (each process run can mint different identifiers for the same logical
+/// occurrence), which would defeat reconciliation entirely. Title + start +
+/// end time is stable across runs and uniquely identifies an occurrence in
+/// practice.
+func sourceKey(for event: EKEvent) -> String {
+    let formatter = ISO8601DateFormatter()
+    let start = event.startDate.map { formatter.string(from: $0) } ?? "unknown"
+    let end = event.endDate.map { formatter.string(from: $0) } ?? "unknown"
+    return "\(event.title ?? "untitled")|\(start)|\(end)"
+}
+
+/// Extracts the source key previously embedded in a CalSync-created event's notes.
+func extractSourceKey(from event: EKEvent) -> String? {
+    guard let notes = event.notes else { return nil }
+    for line in notes.split(separator: "\n") {
+        if line.hasPrefix(sourceKeyMarkerPrefix) {
+            return String(line.dropFirst(sourceKeyMarkerPrefix.count))
+        }
+    }
+    return nil
+}
+
+private func buildNotes(sourceKey: String, sourceNotes: String?) -> String {
+    "Made by CalSync\n\(sourceKeyMarkerPrefix)\(sourceKey)\n\n" + (sourceNotes ?? "")
+}
+
+/// Copies all synced fields from `source` onto `target`, embedding the
+/// source key so future runs can recognize this event again.
+func applyDetails(from source: EKEvent, to target: EKEvent, sourceKey: String) {
+    target.title = source.title
+    target.notes = buildNotes(sourceKey: sourceKey, sourceNotes: source.notes)
+    target.startDate = source.startDate
+    target.endDate = source.endDate
+    target.location = source.location
+    target.url = source.url
+    target.isAllDay = source.isAllDay
+    target.availability = source.availability
+    target.alarms = source.alarms?.map { EKAlarm(relativeOffset: $0.relativeOffset) }
+}
+
+/// Whether `existing` (a previously-synced event) is out of date relative to `source`.
+func needsUpdate(existing: EKEvent, source: EKEvent) -> Bool {
+    if existing.title != source.title { return true }
+    if existing.startDate != source.startDate { return true }
+    if existing.endDate != source.endDate { return true }
+    if existing.location != source.location { return true }
+    if existing.url != source.url { return true }
+    if existing.isAllDay != source.isAllDay { return true }
+    if existing.availability != source.availability { return true }
+
+    let existingOffsets = Set((existing.alarms ?? []).map { $0.relativeOffset })
+    let sourceOffsets = Set((source.alarms ?? []).map { $0.relativeOffset })
+    if existingOffsets != sourceOffsets { return true }
+
+    let sourceNotesBody = source.notes ?? ""
+    let existingNotesBody = (existing.notes ?? "")
+        .components(separatedBy: "\n\n")
+        .dropFirst()
+        .joined(separator: "\n\n")
+    if existingNotesBody != sourceNotesBody { return true }
+
+    return false
+}

@@ -48,52 +48,68 @@ struct RunCommand: ParsableCommand {
                         
                         print("Starting sync from '\(pullCalendar.title)' to '\(pushCalendar.title)'")
                         
-                        // Clear out current CalSync events over sync horizon
-                        let calSyncEvents = getCalSyncEventsNextXDays(calendar: pushCalendar, eventStore: eventStore, numDays: sync.numDays)
-                        print("Found \(calSyncEvents.count) existing CalSync events to clean up")
-                        
-                        deleteEvents(eventStore: eventStore, events: calSyncEvents)
-                        
-                        // Make new events
-                        let events = getNonCalSyncEventsNextXDays(calendar: pullCalendar, eventStore: eventStore, numDays: sync.numDays)
-                        print("Found \(events.count) events to sync")
-                        
-                        for event in events {
-                            print("Syncing event: '\(event.title ?? "Untitled")' from \(String(describing: event.startDate)) to \(String(describing: event.endDate))")
-                            
-                            let newEvent = EKEvent(eventStore: eventStore)
-                            
-                            // Copy basic details
-                            newEvent.title = event.title
-                            newEvent.notes = "Made by CalSync\n\n" + (event.notes ?? "")
-                            newEvent.startDate = event.startDate
-                            newEvent.endDate = event.endDate
-                            newEvent.calendar = pushCalendar
-                            newEvent.location = event.location
-                            newEvent.url = event.url
-                            newEvent.isAllDay = event.isAllDay
-                            newEvent.availability = event.availability
-                            
-                            // Copy alarms if any
-                            if let alarms = event.alarms {
-                                newEvent.alarms = alarms.map { alarm in
-                                    // Create new alarm instance to avoid reference issues
-                                    let newAlarm = EKAlarm(relativeOffset: alarm.relativeOffset)
-                                    return newAlarm
-                                }
-                            }
-                            
-                            // EventKit expands recurring events into individual occurrences when
-                            // querying. We always save each occurrence as a standalone event so
-                            // that deleted occurrences (exceptions) in the source calendar are
-                            // not recreated in the push calendar.
-                            do {
-                                try eventStore.save(newEvent, span: .thisEvent)
-                                print("Successfully created event: \(newEvent.title ?? "Untitled")")
-                            } catch {
-                                print("Error saving event: \(error.localizedDescription)")
+                        // Reconcile instead of delete-all/recreate-all: only touch events that
+                        // actually changed. Nuking and rebuilding the whole calendar on every run
+                        // churns the shared EventKit/CalendarAgent database unnecessarily and can
+                        // race with other apps (e.g. Things) reading calendar data while events are
+                        // mid-delete/mid-create.
+                        let existingCalSyncEvents = getCalSyncEventsNextXDays(calendar: pushCalendar, eventStore: eventStore, numDays: sync.numDays)
+                        var existingByKey: [String: EKEvent] = [:]
+                        for event in existingCalSyncEvents {
+                            if let key = extractSourceKey(from: event) {
+                                existingByKey[key] = event
+                            } else {
+                                // No embedded source key (e.g. leftover from an older CalSync
+                                // version) - treat as stale and remove it below.
+                                existingByKey[event.eventIdentifier ?? UUID().uuidString] = event
                             }
                         }
+                        
+                        let sourceEvents = getNonCalSyncEventsNextXDays(calendar: pullCalendar, eventStore: eventStore, numDays: sync.numDays)
+                        print("Found \(sourceEvents.count) source events, \(existingCalSyncEvents.count) previously synced events")
+                        
+                        var created = 0, updated = 0, unchanged = 0
+                        var matchedKeys = Set<String>()
+                        
+                        for sourceEvent in sourceEvents {
+                            let key = sourceKey(for: sourceEvent)
+                            matchedKeys.insert(key)
+                            
+                            if let existingEvent = existingByKey[key] {
+                                if needsUpdate(existing: existingEvent, source: sourceEvent) {
+                                    applyDetails(from: sourceEvent, to: existingEvent, sourceKey: key)
+                                    do {
+                                        try eventStore.save(existingEvent, span: .thisEvent)
+                                        updated += 1
+                                    } catch {
+                                        print("Error updating event: \(error.localizedDescription)")
+                                    }
+                                } else {
+                                    unchanged += 1
+                                }
+                            } else {
+                                let newEvent = EKEvent(eventStore: eventStore)
+                                newEvent.calendar = pushCalendar
+                                applyDetails(from: sourceEvent, to: newEvent, sourceKey: key)
+                                // EventKit expands recurring events into individual occurrences
+                                // when querying. We always save each occurrence as a standalone
+                                // event so that deleted occurrences (exceptions) in the source
+                                // calendar are not recreated in the push calendar.
+                                do {
+                                    try eventStore.save(newEvent, span: .thisEvent)
+                                    created += 1
+                                } catch {
+                                    print("Error saving event: \(error.localizedDescription)")
+                                }
+                            }
+                        }
+                        
+                        // Remove synced events whose source no longer exists in this horizon
+                        // (e.g. deleted, declined, or moved outside the sync window).
+                        let staleEvents = existingByKey.filter { !matchedKeys.contains($0.key) }.map { $0.value }
+                        deleteEvents(eventStore: eventStore, events: staleEvents)
+                        
+                        print("Sync complete: \(created) created, \(updated) updated, \(unchanged) unchanged, \(staleEvents.count) removed")
                         
                     } catch {
                         print("Error: \(error)")
