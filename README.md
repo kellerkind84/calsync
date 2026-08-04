@@ -83,3 +83,14 @@ You can set up a Sync between any two calendars that have been added to your App
 4. Start the launch agent with `launchctl start com.tpreece101.calsync.plist`
 
 This will run the `CalSync run` command every 15 minutes in the background with any logs going to `/tmp/CalSync_output.log`
+
+## Sync Behavior
+
+`CalSync run` reconciles the push calendar against the pull calendar rather
+than deleting and recreating every synced event on each run: events are
+matched across runs by title + start/end time (embedded in the synced
+event's notes) and only created, updated, or removed when they actually
+differ from the source. A run where nothing changed touches nothing. See
+[`docs/things-hang-investigation-2026-08.md`](docs/things-hang-investigation-2026-08.md)
+for the investigation that led to this, including why the previous
+delete-all/recreate-all approach was a problem.
